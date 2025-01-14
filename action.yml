@@ -340,7 +340,7 @@ runs:
         # Set flags for creating PR comment and tagging actor.
         create_comment=""
         tag_actor=""
-        if [[ $exit_code -ne 0 ]]; then
+        if [[ $exitcode -ne 0 ]]; then
           if [[ "${{ inputs.comment-pr }}" == "on-change" ]]; then create_comment="true"; fi
           if [[ "${{ inputs.tag-actor }}" == "on-change" ]]; then tag_actor="true"; fi
         fi
