@@ -13,9 +13,11 @@ runs:
         which jq > /dev/null 2>&1 || { echo "Please install jq before running this action as it is required for processing JSON outputs."; exit 1; }
         which md5sum > /dev/null 2>&1 || { echo "Please install md5sum before running this action as it is required for naming the plan file artifact uniquely."; exit 1; }
         which unzip > /dev/null 2>&1 || { echo "Please install unzip before running this action as it is required for unpacking the plan file artifact."; exit 1; }
-        which ${{ inputs.tool }} > /dev/null 2>&1 || { echo "Please install ${{ inputs.tool }} before running this action as it is required for provisioning TF code."; exit 1; }
-        if [[ "${{ inputs.plan-encrypt }}" ]]; then which openssl > /dev/null 2>&1 || { echo "Please install openssl before running this action as it is required for plan file encryption."; exit 1; }; fi
-        if [[ "${{ inputs.plan-parity }}" ]]; then which diff > /dev/null 2>&1 || { echo "Please install diff before running this action as it is required for comparing plan file parity."; exit 1; }; fi
+        if [[ "${{ inputs.command }}" != "recheck" ]]; then
+          which ${{ inputs.tool }} > /dev/null 2>&1 || { echo "Please install ${{ inputs.tool }} before running this action as it is required for provisioning TF code."; exit 1; }
+          if [[ "${{ inputs.plan-encrypt }}" ]]; then which openssl > /dev/null 2>&1 || { echo "Please install openssl before running this action as it is required for plan file encryption."; exit 1; }; fi
+          if [[ "${{ inputs.plan-parity }}" ]]; then which diff > /dev/null 2>&1 || { echo "Please install diff before running this action as it is required for comparing plan file parity."; exit 1; }; fi
+        fi
 
     - id: arg
       shell: bash
@@ -486,6 +488,90 @@ runs:
         echo "${{ inputs.tool }} apply${{ steps.arg.outputs.arg-chdir }}${args}" | sed 's/ -/\n -/g' > tf.command.txt
         ${{ inputs.tool }}${{ steps.arg.outputs.arg-chdir }} apply${args} 2> >(tee tf.console.txt) > >(tee tf.console.txt)
 
+    - if: ${{ inputs.command == 'recheck' && inputs.require-approval != '' && steps.identifier.outputs.pr != '0' }}
+      id: approval-recheck
+      shell: bash
+      run: |
+        # Approval recheck: lightweight check of approval status without running TF.
+        # Generate approval key from working directory and workspace.
+        approval_key=""
+        chdir="${{ inputs.arg-chdir || inputs.working-directory }}"
+        workspace="${{ inputs.arg-workspace }}"
+        if [[ -n "$chdir" ]]; then approval_key="$chdir"; fi
+        if [[ -n "$workspace" ]]; then
+          if [[ -n "$approval_key" ]]; then approval_key="${approval_key}:${workspace}"; else approval_key="$workspace"; fi
+        fi
+        if [[ -z "$approval_key" ]]; then approval_key="${{ steps.identifier.outputs.name }}"; fi
+        echo "approval_key=$approval_key" >> "$GITHUB_OUTPUT"
+
+        approvers="${{ inputs.approval-approvers }}"
+        if [[ -z "$approvers" ]]; then
+          echo "::error::require-approval is set but approval-approvers is empty."
+          exit 1
+        fi
+        required_count="${{ inputs.approval-count }}"
+
+        # Fetch PR comments.
+        pr_number="${{ steps.identifier.outputs.pr }}"
+        all_comments=$(gh api /repos/{owner}/{repo}/issues/${pr_number}/comments --header "$GH_API" --method GET --field per_page=100)
+
+        # Check if an approval request comment exists for this identifier.
+        bot_approval_comment=$(echo "$all_comments" | jq --raw-output --arg identifier "tf-approval:${{ steps.identifier.outputs.name }}" '.[] | select(.user.type == "Bot") | select(.body | contains($identifier)) | .id' | tail -n 1)
+        if [[ -z "$bot_approval_comment" ]]; then
+          echo "No pending approval request found for this identifier."
+          echo "approval_required=false" >> "$GITHUB_OUTPUT"
+          echo "approval_status=not-required" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        echo "approval_required=true" >> "$GITHUB_OUTPUT"
+
+        # Check for emergency force-approve from any user.
+        force_approved=$(echo "$all_comments" | jq --raw-output --arg key "/force-approve ${approval_key}" '[.[] | select(.body | split("\n") | map(gsub("^\\s+|\\s+$";"")) | any(. == $key))] | length')
+        if [[ "$force_approved" -gt 0 ]]; then
+          force_user=$(echo "$all_comments" | jq --raw-output --arg key "/force-approve ${approval_key}" '[.[] | select(.body | split("\n") | map(gsub("^\\s+|\\s+$";"")) | any(. == $key))] | .[0].user.login')
+          echo "Force-approved by @${force_user}, bypassing normal approval requirement."
+          echo "approval_status=force-approved" >> "$GITHUB_OUTPUT"
+
+          # Update the approval request comment to reflect force-approval.
+          current_body=$(echo "$all_comments" | jq --raw-output --arg id "$bot_approval_comment" '.[] | select(.id == ($id | tonumber)) | .body')
+          updated_body=$(echo "${current_body}" | sed 's/### Approval Required/### Approval Required \&mdash; Force-Approved/')
+          gh api /repos/{owner}/{repo}/issues/comments/${bot_approval_comment} --header "$GH_API" --method PATCH --field "body=${updated_body}" || true
+          exit 0
+        fi
+
+        # Check for approvals from authorized users.
+        approved_count=0
+        approved_users=""
+        IFS=',' read -ra approver_list <<< "$approvers"
+        for approver in "${approver_list[@]}"; do
+          approver=$(echo "$approver" | xargs)
+          has_approved=$(echo "$all_comments" | jq --raw-output --arg user "$approver" --arg key "/approve ${approval_key}" '[.[] | select(.user.login == $user) | select(.body | split("\n") | map(gsub("^\\s+|\\s+$";"")) | any(. == $key))] | length')
+          if [[ "$has_approved" -gt 0 ]]; then
+            approved_count=$((approved_count + 1))
+            approved_users="${approved_users}@${approver} "
+          fi
+        done
+
+        if [[ $approved_count -ge $required_count ]]; then
+          echo "Approval granted: ${approved_count}/${required_count} from ${approved_users}"
+          echo "approval_status=approved" >> "$GITHUB_OUTPUT"
+
+          # Update the approval request comment to reflect approval.
+          approvers_tagged=$(echo "$approvers" | sed 's/,/, @/g' | sed 's/^/@/')
+          current_body=$(echo "$all_comments" | jq --raw-output --arg id "$bot_approval_comment" '.[] | select(.id == ($id | tonumber)) | .body')
+          updated_body=$(echo "${current_body}" | sed "s|\*\*Approved so far\*\*: [0-9]*/|**Approved so far**: ${approved_count}/|")
+          gh api /repos/{owner}/{repo}/issues/comments/${bot_approval_comment} --header "$GH_API" --method PATCH --field "body=${updated_body}" || true
+        else
+          echo "Approval pending: ${approved_count}/${required_count}"
+          echo "approval_status=pending" >> "$GITHUB_OUTPUT"
+
+          # Update the approval request comment with current count.
+          current_body=$(echo "$all_comments" | jq --raw-output --arg id "$bot_approval_comment" '.[] | select(.id == ($id | tonumber)) | .body')
+          updated_body=$(echo "${current_body}" | sed "s|\*\*Approved so far\*\*: [0-9]*/|**Approved so far**: ${approved_count}/|")
+          gh api /repos/{owner}/{repo}/issues/comments/${bot_approval_comment} --header "$GH_API" --method PATCH --field "body=${updated_body}" || true
+        fi
+
     - id: post
       if: ${{ !cancelled() && steps.identifier.outcome == 'success' && contains(fromJSON('["plan", "apply", "init"]'), inputs.command) }}
       env:
@@ -677,16 +763,16 @@ outputs:
     value: ${{ steps.post.outputs.summary }}
   approval-required:
     description: "Whether approval is required based on the plan diff."
-    value: ${{ steps.approval-check.outputs.approval_required || steps.approval-gate.outputs.approval_required || 'false' }}
+    value: ${{ steps.approval-recheck.outputs.approval_required || steps.approval-check.outputs.approval_required || steps.approval-gate.outputs.approval_required || 'false' }}
   approval-status:
     description: "Approval status: approved, force-approved, pending, or not-required."
-    value: ${{ steps.approval-gate.outputs.approval_status || steps.approval-check.outputs.approval_status || 'not-required' }}
+    value: ${{ steps.approval-recheck.outputs.approval_status || steps.approval-gate.outputs.approval_status || steps.approval-check.outputs.approval_status || 'not-required' }}
 
 inputs:
   # Action parameters.
   command:
     default: ""
-    description: "Command to run between: `plan` or `apply`. Optionally `init` for checks and outputs only (e.g., `plan`)."
+    description: "Command to run between: `plan`, `apply`, or `recheck`. Optionally `init` for checks and outputs only. Use `recheck` for lightweight approval status check without running TF (e.g., on `issue_comment` events)."
     required: false
   comment-method:
     default: "update"

@@ -126,7 +126,7 @@ The following workflows showcase common use cases, while a comprehensive list of
   <tr>
     <td>
       </br>
-      <a href="/.github/examples/pr_push_approval.yaml"><strong>Run on</strong></a> <code>pull_request</code> (plan) and <code>push</code> (apply) events with <strong>approval gate</strong> for multiple environments.
+      <a href="/.github/examples/pr_push_approval.yaml"><strong>Run on</strong></a> <code>pull_request</code> (plan), <code>push</code> (apply), and <code>issue_comment</code> (recheck) events with <strong>approval gate</strong> for multiple environments.
       </br></br>
     </td>
     <td>
@@ -166,7 +166,7 @@ For each workflow run, a matrix-friendly job summary with logs is added as a fal
 | Type     | Name                | Description                                                                                                       |
 | -------- | ------------------- | ----------------------------------------------------------------------------------------------------------------- |
 | CLI      | `working-directory` | Specify the working directory of TF code, alias of `arg-chdir`.</br>Example: `path/to/directory`                  |
-| CLI      | `command`           | Command to run between: `plan` or `apply`.<sup>1</sup></br>Example: `plan`                                        |
+| CLI      | `command`           | Command to run between: `plan`, `apply`, or `recheck`.<sup>1</sup></br>Example: `plan`                             |
 | CLI      | `tool`              | Provisioning tool to use between: `terraform` or `tofu`.</br>Default: `terraform`                                 |
 | Check    | `format`            | Check format of TF code.</br>Default: `false`                                                                     |
 | Check    | `validate`          | Check validation of TF code.</br>Default: `false`                                                                 |
@@ -186,7 +186,8 @@ For each workflow run, a matrix-friendly job summary with logs is added as a fal
 </br>
 
 1. Both `command: plan` and `command: apply` include: `init`, `fmt` (with `format: true`), `validate` (with `validate: true`), and `workspace` (with `arg-workspace`) commands rolled into it automatically.</br>
-  To separately run checks and/or generate outputs only, `command: init` can be used.</br></br>
+  To separately run checks and/or generate outputs only, `command: init` can be used.</br>
+  Use `command: recheck` for lightweight approval status checks without running TF (e.g., triggered by `issue_comment` events when someone comments `/approve` or `/force-approve`).</br></br>
 1. For `merge_group` event trigger, `plan-parity: true` inputs helps to prevent stale apply within the merge queue of workflow runs.</br></br>
 1. The secret string input for `plan-encrypt` can be of any length, as long as it's consistent between encryption (plan) and decryption (apply).</br></br>
 1. The `on-change` option is true when the exit code of the last TF command is non-zero.</br></br>
