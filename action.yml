@@ -207,6 +207,209 @@ runs:
         # Filter lines starting with "  # " and save to tf.diff.txt, then prepend diff-specific symbols based on specific keywords.
         grep '^  # ' tf.console.txt | sed -e 's/^  # \(.* be created\)/+ \1/' -e 's/^  # \(.* be destroyed\)/- \1/' -e 's/^  # \(.* be updated\|.* be replaced\)/! \1/' -e 's/^  # \(.* be read\)/~ \1/' -e 's/^  # \(.*\)/# \1/' > tf.diff.txt || true
 
+    - if: ${{ inputs.require-approval != '' && steps.plan.outcome == 'success' && steps.identifier.outputs.pr != '0' }}
+      id: approval-check
+      shell: bash
+      run: |
+        # Approval check: analyze plan diff and request approval if conditions match.
+        approval_required="false"
+        conditions="${{ inputs.require-approval }}"
+
+        if [[ ! -s tf.diff.txt ]]; then
+          echo "No changes detected, approval not required."
+          echo "approval_required=false" >> "$GITHUB_OUTPUT"
+          echo "approval_status=not-required" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        if echo "$conditions" | grep -qi "always"; then
+          approval_required="true"
+        else
+          IFS=',' read -ra conds <<< "$conditions"
+          for cond in "${conds[@]}"; do
+            cond=$(echo "$cond" | xargs)
+            case "$cond" in
+              create)  grep -q '^+ ' tf.diff.txt && approval_required="true" ;;
+              destroy) grep -q '^- ' tf.diff.txt && approval_required="true" ;;
+              update)  grep -q '^! .*updated' tf.diff.txt && approval_required="true" ;;
+              replace) grep -q '^! .*replaced' tf.diff.txt && approval_required="true" ;;
+              read)    grep -q '^~ ' tf.diff.txt && approval_required="true" ;;
+            esac
+          done
+        fi
+
+        echo "approval_required=$approval_required" >> "$GITHUB_OUTPUT"
+
+        if [[ "$approval_required" == "false" ]]; then
+          echo "Changes do not match approval conditions, approval not required."
+          echo "approval_status=not-required" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        # Generate approval key from working directory and workspace.
+        approval_key=""
+        chdir="${{ inputs.arg-chdir || inputs.working-directory }}"
+        workspace="${{ inputs.arg-workspace }}"
+        if [[ -n "$chdir" ]]; then approval_key="$chdir"; fi
+        if [[ -n "$workspace" ]]; then
+          if [[ -n "$approval_key" ]]; then approval_key="${approval_key}:${workspace}"; else approval_key="$workspace"; fi
+        fi
+        if [[ -z "$approval_key" ]]; then approval_key="${{ steps.identifier.outputs.name }}"; fi
+        echo "approval_key=$approval_key" >> "$GITHUB_OUTPUT"
+
+        approvers="${{ inputs.approval-approvers }}"
+        if [[ -z "$approvers" ]]; then
+          echo "::error::require-approval is set but approval-approvers is empty."
+          exit 1
+        fi
+        required_count="${{ inputs.approval-count }}"
+
+        # Check existing approvals on the PR.
+        pr_number="${{ steps.identifier.outputs.pr }}"
+        all_comments=$(gh api /repos/{owner}/{repo}/issues/${pr_number}/comments --header "$GH_API" --method GET --field per_page=100)
+
+        approved_count=0
+        approved_users=""
+        IFS=',' read -ra approver_list <<< "$approvers"
+        for approver in "${approver_list[@]}"; do
+          approver=$(echo "$approver" | xargs)
+          has_approved=$(echo "$all_comments" | jq --raw-output --arg user "$approver" --arg key "/approve ${approval_key}" '[.[] | select(.user.login == $user) | select(.body | split("\n") | map(gsub("^\\s+|\\s+$";"")) | any(. == $key))] | length')
+          if [[ "$has_approved" -gt 0 ]]; then
+            approved_count=$((approved_count + 1))
+            approved_users="${approved_users}@${approver} "
+          fi
+        done
+
+        if [[ $approved_count -ge $required_count ]]; then
+          echo "Approval already granted: ${approved_count}/${required_count} from ${approved_users}"
+          echo "approval_status=approved" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        echo "approval_status=pending" >> "$GITHUB_OUTPUT"
+
+        # Post or update approval request comment on the PR.
+        diff_content=$(head --bytes=12000 tf.diff.txt)
+        if [[ ${#diff_content} -eq 12000 ]]; then diff_content="${diff_content}"$'\n…'; fi
+        approvers_tagged=$(echo "$approvers" | sed 's/,/, @/g' | sed 's/^/@/')
+
+        approval_body=$(cat <<EOTFVIAPR_APPROVAL
+        <!-- tf-approval:${{ steps.identifier.outputs.name }} -->
+        ### Approval Required
+
+        The following changes require approval before apply:
+
+        \`\`\`diff
+        ${diff_content}
+        \`\`\`
+
+        **Required approvers** (${required_count} of): ${approvers_tagged}
+        **Approved so far**: ${approved_count}/${required_count}
+
+        To approve, comment on this PR:
+        \`\`\`
+        /approve ${approval_key}
+        \`\`\`
+        <!-- tf-approval-end:${{ steps.identifier.outputs.name }} -->
+        EOTFVIAPR_APPROVAL
+        )
+
+        bot_approval_comment=$(echo "$all_comments" | jq --raw-output --arg identifier "tf-approval:${{ steps.identifier.outputs.name }}" '.[] | select(.user.type == "Bot") | select(.body | contains($identifier)) | .id' | tail -n 1)
+
+        if [[ -n "$bot_approval_comment" ]]; then
+          gh api /repos/{owner}/{repo}/issues/comments/${bot_approval_comment} --header "$GH_API" --method PATCH --field "body=${approval_body}"
+        else
+          gh api /repos/{owner}/{repo}/issues/${pr_number}/comments --header "$GH_API" --method POST --field "body=${approval_body}"
+        fi
+
+    - if: ${{ inputs.require-approval != '' && steps.download.outcome == 'success' }}
+      id: approval-gate
+      shell: bash
+      run: |
+        # Approval gate: verify required approvals exist before proceeding with apply.
+        approval_required="false"
+        conditions="${{ inputs.require-approval }}"
+
+        if [[ ! -s tf.diff.txt ]]; then
+          echo "No changes detected, approval not required."
+          echo "approval_required=false" >> "$GITHUB_OUTPUT"
+          echo "approval_status=not-required" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        if echo "$conditions" | grep -qi "always"; then
+          approval_required="true"
+        else
+          IFS=',' read -ra conds <<< "$conditions"
+          for cond in "${conds[@]}"; do
+            cond=$(echo "$cond" | xargs)
+            case "$cond" in
+              create)  grep -q '^+ ' tf.diff.txt && approval_required="true" ;;
+              destroy) grep -q '^- ' tf.diff.txt && approval_required="true" ;;
+              update)  grep -q '^! .*updated' tf.diff.txt && approval_required="true" ;;
+              replace) grep -q '^! .*replaced' tf.diff.txt && approval_required="true" ;;
+              read)    grep -q '^~ ' tf.diff.txt && approval_required="true" ;;
+            esac
+          done
+        fi
+
+        echo "approval_required=$approval_required" >> "$GITHUB_OUTPUT"
+
+        if [[ "$approval_required" == "false" ]]; then
+          echo "Changes do not match approval conditions, proceeding with apply."
+          echo "approval_status=not-required" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        # Generate approval key.
+        approval_key=""
+        chdir="${{ inputs.arg-chdir || inputs.working-directory }}"
+        workspace="${{ inputs.arg-workspace }}"
+        if [[ -n "$chdir" ]]; then approval_key="$chdir"; fi
+        if [[ -n "$workspace" ]]; then
+          if [[ -n "$approval_key" ]]; then approval_key="${approval_key}:${workspace}"; else approval_key="$workspace"; fi
+        fi
+        if [[ -z "$approval_key" ]]; then approval_key="${{ steps.identifier.outputs.name }}"; fi
+
+        approvers="${{ inputs.approval-approvers }}"
+        if [[ -z "$approvers" ]]; then
+          echo "::error::require-approval is set but approval-approvers is empty."
+          exit 1
+        fi
+        required_count="${{ inputs.approval-count }}"
+
+        # Fetch PR comments and check for approvals.
+        pr_number="${{ steps.identifier.outputs.pr }}"
+        if [[ "$pr_number" == "0" ]]; then
+          echo "::error::Cannot verify approval: no PR associated with this workflow run."
+          echo "approval_required=true" >> "$GITHUB_OUTPUT"
+          echo "approval_status=pending" >> "$GITHUB_OUTPUT"
+          exit 1
+        fi
+
+        all_comments=$(gh api /repos/{owner}/{repo}/issues/${pr_number}/comments --header "$GH_API" --method GET --field per_page=100)
+
+        approved_count=0
+        approved_users=""
+        IFS=',' read -ra approver_list <<< "$approvers"
+        for approver in "${approver_list[@]}"; do
+          approver=$(echo "$approver" | xargs)
+          has_approved=$(echo "$all_comments" | jq --raw-output --arg user "$approver" --arg key "/approve ${approval_key}" '[.[] | select(.user.login == $user) | select(.body | split("\n") | map(gsub("^\\s+|\\s+$";"")) | any(. == $key))] | length')
+          if [[ "$has_approved" -gt 0 ]]; then
+            approved_count=$((approved_count + 1))
+            approved_users="${approved_users}@${approver} "
+          fi
+        done
+
+        if [[ $approved_count -ge $required_count ]]; then
+          echo "Approval verified: ${approved_count}/${required_count} from ${approved_users}"
+          echo "approval_status=approved" >> "$GITHUB_OUTPUT"
+        else
+          echo "::error::Insufficient approvals for '${approval_key}': ${approved_count}/${required_count}. Authorized approvers must comment '/approve ${approval_key}' on the PR."
+          echo "approval_status=pending" >> "$GITHUB_OUTPUT"
+          exit 1
+        fi
+
     - if: ${{ inputs.plan-encrypt != '' && steps.plan.outcome == 'success' }}
       env:
         pass: ${{ inputs.plan-encrypt }}
@@ -450,6 +653,12 @@ outputs:
   summary:
     description: "Summary of the last TF command."
     value: ${{ steps.post.outputs.summary }}
+  approval-required:
+    description: "Whether approval is required based on the plan diff."
+    value: ${{ steps.approval-check.outputs.approval_required || steps.approval-gate.outputs.approval_required || 'false' }}
+  approval-status:
+    description: "Approval status: approved, pending, or not-required."
+    value: ${{ steps.approval-gate.outputs.approval_status || steps.approval-check.outputs.approval_status || 'not-required' }}
 
 inputs:
   # Action parameters.
@@ -504,6 +713,18 @@ inputs:
   validate:
     default: "false"
     description: "Check validation of TF code (e.g., `false`)."
+    required: false
+  require-approval:
+    default: ""
+    description: "Comma-separated conditions requiring approval before apply: create, destroy, update, replace, read, always (e.g., `destroy,replace`)."
+    required: false
+  approval-approvers:
+    default: ""
+    description: "Comma-separated GitHub usernames authorized to approve (e.g., `user1,user2`)."
+    required: false
+  approval-count:
+    default: "1"
+    description: "Number of unique approvals required from the approvers list (e.g., `1`)."
     required: false
   working-directory:
     default: ""

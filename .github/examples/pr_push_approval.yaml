@@ -1,0 +1,60 @@
+---
+name: Trigger on pull_request (plan) and push (apply) events with approval gate for multiple environments.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  actions: read        # Required to identify workflow run.
+  checks: write        # Required to add status summary.
+  contents: read       # Required to checkout repository.
+  pull-requests: write # Required to add comment and label.
+
+jobs:
+  dev:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup TF
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Provision TF (dev)
+        id: tf
+        uses: op5dev/tf-via-pr@v13
+        with:
+          working-directory: stacks/dev
+          command: ${{ github.event_name == 'push' && 'apply' || 'plan' }}
+          arg-lock: ${{ github.event_name == 'push' }}
+          plan-encrypt: ${{ secrets.PASSPHRASE }}
+          # Only require approval for destructive changes.
+          require-approval: destroy,replace
+          approval-approvers: admin1,admin2,admin3
+          approval-count: 1
+
+  prod:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup TF
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Provision TF (prod)
+        id: tf
+        uses: op5dev/tf-via-pr@v13
+        with:
+          working-directory: stacks/prod
+          command: ${{ github.event_name == 'push' && 'apply' || 'plan' }}
+          arg-lock: ${{ github.event_name == 'push' }}
+          plan-encrypt: ${{ secrets.PASSPHRASE }}
+          # Require approval for any changes to production.
+          require-approval: always
+          approval-approvers: admin1,admin2,admin3
+          approval-count: 2

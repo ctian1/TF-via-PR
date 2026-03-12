@@ -123,6 +123,15 @@ The following workflows showcase common use cases, while a comprehensive list of
       </br></br>
     </td>
   </tr>
+  <tr>
+    <td>
+      </br>
+      <a href="/.github/examples/pr_push_approval.yaml"><strong>Run on</strong></a> <code>pull_request</code> (plan) and <code>push</code> (apply) events with <strong>approval gate</strong> for multiple environments.
+      </br></br>
+    </td>
+    <td>
+    </td>
+  </tr>
 </table>
 
 </br>
@@ -164,6 +173,9 @@ For each workflow run, a matrix-friendly job summary with logs is added as a fal
 | Check    | `plan-parity`       | Replace plan file if it matches a newly-generated one to prevent stale apply.<sup>2</sup></br>Default: `false`    |
 | Security | `plan-encrypt`      | Encrypt plan file artifact with the given input.<sup>3</sup></br>Example: `${{ secrets.PASSPHRASE }}`             |
 | Security | `token`             | Specify a GitHub token.</br>Default: `${{ github.token }}`                                                        |
+| Approval | `require-approval`  | Conditions requiring approval before apply: comma-separated list of `create`, `destroy`, `update`, `replace`, `read`, `always`.<sup>6</sup></br>Example: `destroy,replace` |
+| Approval | `approval-approvers`| Comma-separated GitHub usernames authorized to approve.<sup>6</sup></br>Example: `user1,user2`                    |
+| Approval | `approval-count`    | Number of unique approvals required from the approvers list.<sup>6</sup></br>Default: `1`                         |
 | UI       | `label-pr`          | Add a PR label with the command input (e.g., `tf:plan`).</br>Default: `true`                                      |
 | UI       | `comment-pr`        | Add a PR comment: `always`, `on-change`, or `never`.<sup>4</sup></br>Default: `always`                            |
 | UI       | `comment-method`    | PR comment by: `update` existing comment or `recreate` and delete previous one.<sup>5</sup></br>Default: `update` |
@@ -180,6 +192,7 @@ For each workflow run, a matrix-friendly job summary with logs is added as a fal
 1. The `on-change` option is true when the exit code of the last TF command is non-zero.</br></br>
 1. The default behavior of `comment-method` is to update the existing PR comment with the latest plan/apply output, making it easy to track changes over time through the comment's revision history.</br></br>
   [![PR comment revision history comparing plan and apply outputs.](/.github/assets/revisions.png)](https://raw.githubusercontent.com/op5dev/tf-via-pr/refs/heads/main/.github/assets/revisions.png "View full-size image.")
+1. When `require-approval` is set, the action analyzes the plan diff and posts an approval request comment on the PR if the configured conditions match. Authorized users approve by commenting `/approve <key>` where `<key>` is derived from the working directory and workspace (e.g., `/approve stacks/prod:prod-us1`). During apply, the action verifies that the required number of approvals have been received before proceeding. Each action instance (e.g., per environment) has its own approval key, so multiple environments in one PR can have independent approval gates.</br></br>
 
 </br>
 
@@ -254,6 +267,8 @@ For each workflow run, a matrix-friendly job summary with logs is added as a fal
 | Workflow | `job-id`     | ID of the workflow job.                       |
 | Workflow | `run-url`    | URL of the workflow run.                      |
 | Workflow | `identifier` | Unique name of the workflow run and artifact. |
+| Approval | `approval-required` | Whether approval is required based on the plan diff. |
+| Approval | `approval-status`   | Approval status: `approved`, `pending`, or `not-required`. |
 
 </br>
 
