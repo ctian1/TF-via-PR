@@ -1,0 +1,93 @@
+---
+name: Trigger on pull_request (plan), push (apply), and issue_comment (approval recheck) events with approval gate for multiple environments.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  issue_comment:
+    types: [created]
+
+permissions:
+  actions: read        # Required to identify workflow run.
+  checks: write        # Required to add status summary.
+  contents: read       # Required to checkout repository.
+  pull-requests: write # Required to add comment and label.
+
+jobs:
+  # Lightweight approval recheck on PR comments (e.g., /approve or /force-approve).
+  approval:
+    if: github.event_name == 'issue_comment' && github.event.issue.pull_request && (startsWith(github.event.comment.body, '/approve') || startsWith(github.event.comment.body, '/force-approve'))
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - directory: stacks/dev
+            approvers: admin1,admin2,admin3
+            count: 1
+            conditions: destroy,replace
+          - directory: stacks/prod
+            approvers: admin1,admin2,admin3
+            count: 2
+            conditions: always
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Recheck approval
+        uses: op5dev/tf-via-pr@v13
+        with:
+          working-directory: ${{ matrix.directory }}
+          command: recheck
+          require-approval: ${{ matrix.conditions }}
+          approval-approvers: ${{ matrix.approvers }}
+          approval-count: ${{ matrix.count }}
+
+  dev:
+    if: github.event_name != 'issue_comment'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup TF
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Provision TF (dev)
+        id: tf
+        uses: op5dev/tf-via-pr@v13
+        with:
+          working-directory: stacks/dev
+          command: ${{ github.event_name == 'push' && 'apply' || 'plan' }}
+          arg-lock: ${{ github.event_name == 'push' }}
+          plan-encrypt: ${{ secrets.PASSPHRASE }}
+          # Only require approval for destructive changes.
+          require-approval: destroy,replace
+          approval-approvers: admin1,admin2,admin3
+          approval-count: 1
+
+  prod:
+    if: github.event_name != 'issue_comment'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup TF
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Provision TF (prod)
+        id: tf
+        uses: op5dev/tf-via-pr@v13
+        with:
+          working-directory: stacks/prod
+          command: ${{ github.event_name == 'push' && 'apply' || 'plan' }}
+          arg-lock: ${{ github.event_name == 'push' }}
+          plan-encrypt: ${{ secrets.PASSPHRASE }}
+          # Require approval for any changes to production.
+          require-approval: always
+          approval-approvers: admin1,admin2,admin3
+          approval-count: 2
