@@ -192,7 +192,7 @@ For each workflow run, a matrix-friendly job summary with logs is added as a fal
 1. The `on-change` option is true when the exit code of the last TF command is non-zero.</br></br>
 1. The default behavior of `comment-method` is to update the existing PR comment with the latest plan/apply output, making it easy to track changes over time through the comment's revision history.</br></br>
   [![PR comment revision history comparing plan and apply outputs.](/.github/assets/revisions.png)](https://raw.githubusercontent.com/op5dev/tf-via-pr/refs/heads/main/.github/assets/revisions.png "View full-size image.")
-1. When `require-approval` is set, the action analyzes the plan diff and posts an approval request comment on the PR if the configured conditions match. Authorized users approve by commenting `/approve <key>` where `<key>` is derived from the working directory and workspace (e.g., `/approve stacks/prod:prod-us1`). During apply, the action verifies that the required number of approvals have been received before proceeding. Each action instance (e.g., per environment) has its own approval key, so multiple environments in one PR can have independent approval gates.</br></br>
+1. When `require-approval` is set, the action analyzes the plan diff and posts an approval request comment on the PR if the configured conditions match. Authorized users approve by commenting `/approve <key>` where `<key>` is derived from the working directory and workspace (e.g., `/approve stacks/prod:prod-us1`). During apply, the action verifies that the required number of approvals have been received before proceeding. Each action instance (e.g., per environment) has its own approval key, so multiple environments in one PR can have independent approval gates. For emergencies, **anyone** can bypass the normal approval process by commenting `/force-approve <key>`.</br></br>
 
 </br>
 
@@ -268,7 +268,7 @@ For each workflow run, a matrix-friendly job summary with logs is added as a fal
 | Workflow | `run-url`    | URL of the workflow run.                      |
 | Workflow | `identifier` | Unique name of the workflow run and artifact. |
 | Approval | `approval-required` | Whether approval is required based on the plan diff. |
-| Approval | `approval-status`   | Approval status: `approved`, `pending`, or `not-required`. |
+| Approval | `approval-status`   | Approval status: `approved`, `force-approved`, `pending`, or `not-required`. |
 
 </br>
 
